@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <string>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -148,33 +149,49 @@ public:
         int fd = g_agent_fd;
         g_agent_fd = -1;
 
-        /* Run injection in background thread so we don't block the main thread. */
-        JNIEnv *jenv = env;
-        std::thread([fd, jenv]() {
-            LOGI("Background injection via fd %d", fd);
+        /* Create socketpair + AgentArgs for hello_entry.
+           hello_entry expects a VALID socket fd - passing -1 causes
+           .try_clone().expect() panic in Rust agent. */
+        std::thread([fd]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(kDelayMs));
 
             void *handle = custom_dlopen_fd(fd);
-            if (!handle) {
-                LOGE("custom_dlopen_fd failed");
-                close(fd);
-                return;
-            }
+            if (!handle) { LOGE("load failed"); close(fd); return; }
             LOGI("Agent loaded at %p", handle);
 
-            typedef jint (*jni_onload_t)(JavaVM *, void *);
-            auto jni_onload = (jni_onload_t)custom_dlsym(handle, "JNI_OnLoad");
-            if (jni_onload) {
-                JavaVM *jvm = nullptr;
-                jenv->GetJavaVM(&jvm);
-                if (jvm) {
-                    jni_onload(jvm, nullptr);
-                    LOGI("JNI_OnLoad called");
-                }
+            typedef void *(*entry_fn)(void *);
+            auto entry = (entry_fn)custom_dlsym(handle, "hello_entry");
+            if (!entry) { LOGE("hello_entry not found"); close(fd); return; }
+
+            /* Create socketpair: fds[1] goes to agent, fds[0] stored
+               for future host connection via abstract socket. */
+            int socks[2];
+            if (socketpair(AF_UNIX, SOCK_STREAM, 0, socks) < 0) {
+                LOGE("socketpair failed: %s", strerror(errno));
+                close(fd); return;
             }
 
+            struct AgentArgs {
+                uint64_t table;
+                int32_t ctrl_fd;
+                int32_t agent_memfd;
+            };
+            static uint8_t g_string_table[256] = {0};
+            memcpy(g_string_table, "output_path=/dev/null", 21);
+
+            AgentArgs args;
+            args.table = (uint64_t)(uintptr_t)g_string_table;
+            args.ctrl_fd = socks[1];       /* agent's end */
+            args.agent_memfd = -1;
+
+            LOGI("Calling hello_entry (fd=%d)", args.ctrl_fd);
+            /* hello_entry blocks waiting for host commands.
+               It never returns until the socket is closed. */
+            entry(&args);
+            LOGI("hello_entry returned (agent shutdown)");
+
+            close(socks[0]);
             close(fd);
-            LOGI("Injection thread done");
         }).detach();
 
         LOGI("Injection thread spawned");
