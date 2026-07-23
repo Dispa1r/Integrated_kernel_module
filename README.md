@@ -37,6 +37,15 @@ docker run --rm -v $(pwd):/driver ghcr.io/ylarod/ddk:android15-6.6 \
 
 Or via `ddk_build_all.sh` for all Android versions (5.10 - 6.12).
 
+## rfrida-zygisk: Zygisk Injection Module
+
+Also includes a Zygisk module (`rfrida_zygisk/`) for stealth agent.so injection:
+
+- Zygisk API v2, compatible with ZygiskNext 1.4.2
+- Custom ELF linker loads agent via **anonymous mmap** — no dlopen, no /proc/maps trace
+- Zero ptrace — injects automatically at Zygote fork time
+- SELinux-aware: opens agent via module dir fd in preAppSpecialize
+
 ## License
 
 GPL-2.0
