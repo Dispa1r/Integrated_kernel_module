@@ -72,6 +72,12 @@ author=rfrida
 description=Stealth agent injection via custom ELF linker
 EOF"
 
+# Create targets.txt (one package per line, # for comments)
+adb shell su -c "cat > /data/adb/modules/rfrida_zygisk/targets.txt << EOF
+# Add target packages below (one per line), then reboot
+com.tencent.rmcn
+EOF"
+
 # Fix SELinux context (critical! Zygisk needs system_file context)
 adb shell su -c "
 chcon -R u:object_r:system_file:s0 /data/adb/modules/rfrida_zygisk/
@@ -82,6 +88,18 @@ chcon u:object_r:system_lib_file:s0 /data/adb/modules/rfrida_zygisk/zygisk/arm64
 adb reboot
 adb wait-for-device
 sleep 20
+```
+
+### Changing injection targets
+
+Edit `/data/adb/modules/rfrida_zygisk/targets.txt` on device, then reboot. No recompilation needed.
+
+```bash
+adb shell su -c "cat > /data/adb/modules/rfrida_zygisk/targets.txt << EOF
+com.example.game1
+com.example.game2
+EOF"
+adb reboot
 ```
 
 ## Step 3: Verify kernel module

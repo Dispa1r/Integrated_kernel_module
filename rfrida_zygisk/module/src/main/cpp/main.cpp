@@ -21,20 +21,63 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* Target configuration */
-static const char *kAgentName = "agent.so";  /* in module directory */
-static const char *kEntryName = "hello_entry";
+/* Default config - can be overridden by targets.txt in module directory */
+static const char *kAgentName = "agent.so";
 static int kDelayMs = 2000;
+static std::vector<std::string> g_targets;
 
-/* Target packages that should be injected */
-static const char *kTargetPackages[] = {
-    "com.android.systemui",
-    nullptr
-};
+/* Read target list from module_dir/targets.txt (one package per line, # comments).
+   Falls back to DEFAULT_TARGET if file not found. */
+#define DEFAULT_TARGET "com.tencent.rmcn"
+
+static void load_targets(int module_dir_fd) {
+    g_targets.clear();
+
+    int fd = openat(module_dir_fd, "targets.txt", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        /* No config file - use default */
+        g_targets.push_back(DEFAULT_TARGET);
+        LOGI("No targets.txt, using default: %s", DEFAULT_TARGET);
+        return;
+    }
+
+    /* Read file */
+    char buf[4096] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (n <= 0) {
+        g_targets.push_back(DEFAULT_TARGET);
+        return;
+    }
+
+    /* Parse: one package per line, skip # comments and empty lines */
+    std::string content(buf, n);
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t nl = content.find('\n', pos);
+        if (nl == std::string::npos) nl = content.size();
+        std::string line = content.substr(pos, nl - pos);
+        pos = nl + 1;
+        /* Trim */
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        while (!line.empty() && (line.front() == ' '))
+            line.erase(0, 1);
+        if (line.empty() || line[0] == '#') continue;
+        g_targets.push_back(line);
+        LOGI("Target: %s", line.c_str());
+    }
+
+    if (g_targets.empty()) {
+        g_targets.push_back(DEFAULT_TARGET);
+    }
+    LOGI("Loaded %zu targets", g_targets.size());
+}
 
 static bool is_target(const std::string &pkg) {
-    for (int i = 0; kTargetPackages[i]; i++) {
-        if (pkg == kTargetPackages[i]) return true;
+    for (auto &t : g_targets) {
+        if (pkg == t) return true;
     }
     return false;
 }
@@ -63,12 +106,19 @@ public:
 
         g_enabled = false;
         if (nice_name && nice_name[0]) {
+            /* Load target list from module directory on first call */
+            if (g_targets.empty()) {
+                int dirfd = api->getModuleDir();
+                if (dirfd >= 0) load_targets(dirfd);
+            }
             bool target = is_target(nice_name);
             LOGI("Target check: %s -> %d", nice_name, target);
             if (target) {
                 g_enabled = true;
                 int dirfd = api->getModuleDir();
                 LOGI("Module dir fd: %d", dirfd);
+                /* Load targets on first use */
+                if (g_targets.empty()) load_targets(dirfd);
                 if (dirfd >= 0) {
                     g_agent_fd = openat(dirfd, kAgentName, O_RDONLY | O_CLOEXEC);
                     if (g_agent_fd >= 0) {
@@ -95,33 +145,39 @@ public:
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (!g_enabled || g_agent_fd < 0) return;
 
-        LOGI("postAppSpecialize: injecting via fd %d", g_agent_fd);
-
-        if (kDelayMs > 0) {
-            LOGI("Sleeping %dms", kDelayMs);
-            std::this_thread::sleep_for(std::chrono::milliseconds(kDelayMs));
-        }
-
-        /* Load agent via custom linker using proc/self/fd */
-        void *handle = custom_dlopen_fd(g_agent_fd);
-        if (!handle) {
-            LOGE("custom_dlopen_fd failed");
-            return;
-        }
-        LOGI("Agent loaded at %p", handle);
-
-        typedef void (*entry_fn)(void *);
-        auto entry = (entry_fn)custom_dlsym(handle, kEntryName);
-        if (!entry) entry = (entry_fn)custom_dlsym(handle, "JNI_OnLoad");
-        if (entry) {
-            LOGI("Calling entry point");
-            entry(nullptr);
-            LOGI("Injection complete!");
-        } else {
-            LOGE("entry point not found");
-        }
-        close(g_agent_fd);
+        int fd = g_agent_fd;
         g_agent_fd = -1;
+
+        /* Run injection in background thread so we don't block the main thread. */
+        JNIEnv *jenv = env;
+        std::thread([fd, jenv]() {
+            LOGI("Background injection via fd %d", fd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(kDelayMs));
+
+            void *handle = custom_dlopen_fd(fd);
+            if (!handle) {
+                LOGE("custom_dlopen_fd failed");
+                close(fd);
+                return;
+            }
+            LOGI("Agent loaded at %p", handle);
+
+            typedef jint (*jni_onload_t)(JavaVM *, void *);
+            auto jni_onload = (jni_onload_t)custom_dlsym(handle, "JNI_OnLoad");
+            if (jni_onload) {
+                JavaVM *jvm = nullptr;
+                jenv->GetJavaVM(&jvm);
+                if (jvm) {
+                    jni_onload(jvm, nullptr);
+                    LOGI("JNI_OnLoad called");
+                }
+            }
+
+            close(fd);
+            LOGI("Injection thread done");
+        }).detach();
+
+        LOGI("Injection thread spawned");
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
