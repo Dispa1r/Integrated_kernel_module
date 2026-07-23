@@ -40,3 +40,13 @@ Or via `ddk_build_all.sh` for all Android versions (5.10 - 6.12).
 ## License
 
 GPL-2.0
+
+## References
+
+This project integrates two open-source projects:
+
+- **[lsdriver](https://github.com/Dispa1r/Zygisk-Il2CppDumper)** — Android ARM64 kernel driver providing memory R/W, hardware/PTE/step breakpoints, system call monitoring, and virtual input injection. Communicates with userspace via a shared-memory protocol.
+
+- **[wxshadow](https://github.com/ylarod/wxshadow)** — W^X Shadow Memory KPM (KernelPatch Module). Stealth code breakpoints and patches using shadow page tables: the target process reads the original code (`r--`) but executes the modified shadow page (`--x`). Completely undetectable by memory integrity checks.
+
+The wxshadow core algorithm (shadow page lifecycle, PTE state machine, BRK/single-step/page-fault handlers) was ported from KPM framework to lsdriver's inline hook framework and shared-memory protocol.
