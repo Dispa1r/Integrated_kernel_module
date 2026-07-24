@@ -12,6 +12,8 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <string>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <thread>
@@ -149,9 +151,9 @@ public:
         int fd = g_agent_fd;
         g_agent_fd = -1;
 
-        /* Create socketpair + AgentArgs for hello_entry.
-           hello_entry expects a VALID socket fd - passing -1 causes
-           .try_clone().expect() panic in Rust agent. */
+        /* Create socketpair + TCP bridge for host-agent communication.
+           socks[1] -> agent (as ctrl_fd)
+           socks[0] -> TCP bridge on 127.0.0.1:27042 -> adb forward -> host */
         std::thread([fd]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(kDelayMs));
 
@@ -163,12 +165,82 @@ public:
             auto entry = (entry_fn)custom_dlsym(handle, "hello_entry");
             if (!entry) { LOGE("hello_entry not found"); close(fd); return; }
 
-            /* Create socketpair: fds[1] goes to agent, fds[0] stored
-               for future host connection via abstract socket. */
             int socks[2];
             if (socketpair(AF_UNIX, SOCK_STREAM, 0, socks) < 0) {
-                LOGE("socketpair failed: %s", strerror(errno));
-                close(fd); return;
+                LOGE("socketpair failed: %s", strerror(errno)); close(fd); return;
+            }
+
+            /* Start TCP bridge: socks[0] <-> TCP 127.0.0.1:27042 */
+            int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (tcp_fd >= 0) {
+                int opt = 1;
+                setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                struct sockaddr_in addr = {};
+                addr.sin_family = AF_INET;
+                addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                addr.sin_port = htons(27042);
+
+                if (bind(tcp_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0 &&
+                    listen(tcp_fd, 1) == 0) {
+                    LOGI("TCP bridge listening on 127.0.0.1:27042");
+                    /* Accept one connection in background, then bridge */
+                    std::thread([tcp_fd, sp_fd = socks[0]]() {
+                        /* Loop: accept clients, bridge each one to socks[0].
+                           Never close socks[0] - the agent needs it alive.
+                           When a client disconnects, just accept the next one. */
+                        while (true) {
+                            struct sockaddr_in cli = {};
+                            socklen_t clen = sizeof(cli);
+                            int cli_fd = accept(tcp_fd, (struct sockaddr*)&cli, &clen);
+                            if (cli_fd < 0) { LOGE("accept failed"); break; }
+                            LOGI("Host connected, bridging...");
+
+                            fd_set fds;
+                            char buf[4096];
+                            bool client_alive = true;
+                            while (client_alive) {
+                                FD_ZERO(&fds);
+                                FD_SET(cli_fd, &fds);
+                                FD_SET(sp_fd, &fds);
+                                int maxfd = (cli_fd > sp_fd ? cli_fd : sp_fd) + 1;
+                                if (select(maxfd, &fds, nullptr, nullptr, nullptr) <= 0) break;
+                                if (FD_ISSET(cli_fd, &fds)) {
+                                    ssize_t n = read(cli_fd, buf, sizeof(buf));
+                                    if (n <= 0) { client_alive = false; break; }
+                                    /* write_all: handle short writes */
+                                    ssize_t sent = 0;
+                                    while (sent < n) {
+                                        ssize_t r = write(sp_fd, buf + sent, n - sent);
+                                        if (r <= 0) { client_alive = false; break; }
+                                        sent += r;
+                                    }
+                                    if (!client_alive) break;
+                                }
+                                if (FD_ISSET(sp_fd, &fds)) {
+                                    ssize_t n = read(sp_fd, buf, sizeof(buf));
+                                    if (n <= 0) { client_alive = false; break; }
+                                    ssize_t sent = 0;
+                                    while (sent < n) {
+                                        ssize_t r = write(cli_fd, buf + sent, n - sent);
+                                        if (r <= 0) { client_alive = false; break; }
+                                        sent += r;
+                                    }
+                                    if (!client_alive) break;
+                                }
+                            }
+                            close(cli_fd);
+                            LOGI("Client disconnected, waiting for next...");
+                            /* socks[0] stays open - agent is still running */
+                        }
+                        close(tcp_fd);
+                        LOGI("TCP server stopped");
+                    }).detach();
+                } else {
+                    LOGE("TCP bind/listen failed: %s", strerror(errno));
+                    close(tcp_fd);
+                }
+            } else {
+                LOGE("TCP socket failed");
             }
 
             struct AgentArgs {
@@ -181,16 +253,12 @@ public:
 
             AgentArgs args;
             args.table = (uint64_t)(uintptr_t)g_string_table;
-            args.ctrl_fd = socks[1];       /* agent's end */
+            args.ctrl_fd = socks[1];
             args.agent_memfd = -1;
 
-            LOGI("Calling hello_entry (fd=%d)", args.ctrl_fd);
-            /* hello_entry blocks waiting for host commands.
-               It never returns until the socket is closed. */
+            LOGI("Calling hello_entry (fd=%d, tcp=27042)", args.ctrl_fd);
             entry(&args);
-            LOGI("hello_entry returned (agent shutdown)");
-
-            close(socks[0]);
+            LOGI("hello_entry returned");
             close(fd);
         }).detach();
 

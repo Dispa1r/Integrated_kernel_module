@@ -58,3 +58,19 @@ static const char *kTargetPackages[] = {
 - [ZygiskNext](https://github.com/5ec1cff/ZygiskNext) - Standalone Zygisk implementation
 - [Zygisk-MyInjector](https://github.com/jiqiu2022/Zygisk-MyInjector) - Reference Zygisk injector
 - [rustFrida](https://github.com/kkkbbb/mkpms) - The agent.so to inject
+
+## Stealth Hook (W^X Shadow)
+
+When `Java.setStealth(true)` is enabled, all native hooks use the wxshadow
+stealth path:
+
+```
+Agent hook_engine_mem.c
+  → HTTP POST to lsdriver bridge (127.0.0.1:19494)
+    → shared memory → lsdriver.ko kernel module
+      → wxshadow_handle_patch() → shadow page table → W^X split
+```
+
+This makes hooks completely undetectable by memory integrity checks:
+- Process reads: original bytes (page mapped r-- on read fault)
+- Process executes: modified bytes from shadow page (--x)
