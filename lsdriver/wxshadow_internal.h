@@ -70,6 +70,7 @@ int wx_pte_switch_to_stepping(struct wxshadow_page *pg);
 void wx_tlb_flush(struct mm_struct *mm, unsigned long vaddr);
 void wx_pte_read_lock(struct wxshadow_page *pg);
 void wx_pte_read_unlock(struct wxshadow_page *pg);
+void wx_init_icache_fn(void);
 
 /* ---- Shadow 页核心 (wxshadow_core.c) ---- */
 struct wxshadow_page *wx_find_page(struct mm_struct *mm, unsigned long page_addr);

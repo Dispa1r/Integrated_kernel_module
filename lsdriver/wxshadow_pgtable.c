@@ -86,16 +86,29 @@ static pte_t wx_build_pte_rx(unsigned long pfn)
 }
 
 /* ---- PTE 写入 ---- */
+/* Resolved via kallsyms at init time (__sync_icache_dcache is not exported
+ * on Android GKI but is needed for proper I-cache coherence after PTE switch). */
+static void (*fn_sync_icache_dcache)(pte_t pte);
+
+void wx_init_icache_fn(void)
+{
+    unsigned long addr = wx_kallsyms_lookup("__sync_icache_dcache");
+    if (addr)
+        fn_sync_icache_dcache = (void *)addr;
+}
+
 static int wx_write_pte(struct mm_struct *mm, unsigned long vaddr, pte_t new_pte)
 {
     pte_t *ptep = wx_get_user_pte_impl(mm, vaddr);
     if (!ptep) return -EFAULT;
 
-    /* 原子写入 PTE */
     set_pte(ptep, new_pte);
 
-    /* 内存屏障确保 PTE 写入对其他 CPU 可见 */
-    wmb();
+    /* Call __sync_icache_dcache (resolved via kallsyms) for proper
+     * D-cache clean + I-cache invalidation on the shadow page.
+     * This is what set_pte_at() would do for executable user mappings. */
+    if (fn_sync_icache_dcache)
+        fn_sync_icache_dcache(new_pte);
 
     return 0;
 }
@@ -148,10 +161,16 @@ int wx_pte_switch_to_shadow(struct wxshadow_page *pg)
     int ret;
 
     if (pg->dead) return -EINVAL;
-    if (pg->state == WX_STATE_SHADOW_X) return 0; /* 已经是 shadow */
+    if (pg->state == WX_STATE_SHADOW_X) {
+        printk(KERN_EMERG "WXSHADOW: pte_switch already SHADOW_X\n");
+        return 0;
+    }
 
     shadow_pte = wx_build_pte_execonly(pg->pfn_shadow);
+    printk(KERN_EMERG "WXSHADOW: pte_switch writing shadow pfn=0x%lx to vaddr=0x%llx\n",
+           pg->pfn_shadow, (unsigned long long)pg->page_addr);
     ret = wx_write_pte(mm, pg->page_addr, shadow_pte);
+    printk(KERN_EMERG "WXSHADOW: pte_switch write_pte ret=%d state_was=%d\n", ret, (int)pg->state);
     if (ret == 0) {
         pg->state = WX_STATE_SHADOW_X;
         wx_tlb_flush(mm, pg->page_addr);

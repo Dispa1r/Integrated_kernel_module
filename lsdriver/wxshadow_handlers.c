@@ -319,6 +319,9 @@ int wxshadow_init(void)
 {
     ls_log_tag("wxshadow", "W^X Shadow Hook init start\n");
 
+    /* Resolve __sync_icache_dcache via kallsyms (not exported on GKI) */
+    wx_init_icache_fn();
+
     /* Hooks are installed by lsdriver_main.o (which owns the trampoline slots).
      * Handler functions (wx_on_brk, wx_on_step) are called from there. */
     atomic_set(&g_wx_init_done, 1);

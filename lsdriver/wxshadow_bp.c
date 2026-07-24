@@ -202,7 +202,16 @@ int wxshadow_handle_set_bp(int pid, uint64_t addr, const struct wxshadow_bp_cfg 
     }
 
     /* 激活 shadow 映射 */
-    wx_pte_switch_to_shadow(pg);
+    {
+        int switch_ret = wx_pte_switch_to_shadow(pg);
+        if (switch_ret != 0) {
+            ls_log_tag("wxshadow", "SET_BP pte_switch_to_shadow failed: ret=%d addr=0x%llx\n",
+                       switch_ret, (unsigned long long)addr);
+            wx_page_put(pg);
+            mmput(mm);
+            return switch_ret;
+        }
+    }
 
     ls_log_tag("wxshadow", "SET_BP pid=%d addr=0x%llx bp_index=%d reg_mods=%d\n",
                pid, (unsigned long long)addr, bp_index, cfg->nr_reg_mods);
@@ -335,7 +344,16 @@ int wxshadow_handle_patch(int pid, uint64_t page_addr, const struct wxshadow_pat
     }
 
     /* 激活 shadow */
-    wx_pte_switch_to_shadow(pg);
+    {
+        int switch_ret = wx_pte_switch_to_shadow(pg);
+        if (switch_ret != 0) {
+            ls_log_tag("wxshadow", "PATCH pte_switch_to_shadow failed: ret=%d page=0x%llx\n",
+                       switch_ret, (unsigned long long)page_addr);
+            wx_page_put(pg);
+            mmput(mm);
+            return switch_ret;
+        }
+    }
 
     ls_log_tag("wxshadow", "PATCH pid=%d page=0x%llx offset=%u len=%u\n",
                pid, (unsigned long long)page_addr, cfg->offset, cfg->len);

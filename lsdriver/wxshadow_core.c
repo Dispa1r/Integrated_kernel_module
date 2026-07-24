@@ -158,7 +158,7 @@ struct wxshadow_page *wx_create_page(struct mm_struct *mm, unsigned long page_ad
     pg->pfn_shadow = virt_to_pfn(shadow_kva);
     pg->shadow_kva = shadow_kva;
     pg->saved_ptep = saved_ptep;
-    pg->state = WX_STATE_SHADOW_X;
+    pg->state = WX_STATE_ORIGINAL; /* PTE not yet switched — done by caller */
     pg->stepping_task = NULL;
     pg->brk_in_flight = 0;
     pg->refcount = 1;   /* 调用者持有 */
