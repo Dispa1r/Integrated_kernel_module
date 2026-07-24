@@ -14,6 +14,7 @@
 #include "wxshadow_internal.h"
 #include <asm/tlbflush.h>
 #include <asm/barrier.h>
+#include <linux/highmem.h>
 
 /* PTE 权限位掩码 (ARM64) */
 #define PTE_USER               (_AT(pteval_t, 1) << 6)
@@ -86,15 +87,16 @@ static pte_t wx_build_pte_rx(unsigned long pfn)
 }
 
 /* ---- PTE 写入 ---- */
-/* Resolved via kallsyms at init time (__sync_icache_dcache is not exported
- * on Android GKI but is needed for proper I-cache coherence after PTE switch). */
+/* Resolved via kallsyms at init time. __sync_icache_dcache is not exported
+ * on Android GKI; if resolution fails, fall back to flush_dcache_page(). */
 static void (*fn_sync_icache_dcache)(pte_t pte);
 
 void wx_init_icache_fn(void)
 {
     unsigned long addr = wx_kallsyms_lookup("__sync_icache_dcache");
-    if (addr)
+    if (addr) {
         fn_sync_icache_dcache = (void *)addr;
+    }
 }
 
 static int wx_write_pte(struct mm_struct *mm, unsigned long vaddr, pte_t new_pte)
@@ -104,11 +106,16 @@ static int wx_write_pte(struct mm_struct *mm, unsigned long vaddr, pte_t new_pte
 
     set_pte(ptep, new_pte);
 
-    /* Call __sync_icache_dcache (resolved via kallsyms) for proper
-     * D-cache clean + I-cache invalidation on the shadow page.
-     * This is what set_pte_at() would do for executable user mappings. */
-    if (fn_sync_icache_dcache)
+    if (fn_sync_icache_dcache) {
         fn_sync_icache_dcache(new_pte);
+    } else {
+        /* Fallback: clean D-cache for the shadow page via kernel linear map.
+         * The userspace agent's DC CIVAC + IC IVAU will handle I-cache. */
+        struct page *pg = pfn_to_page(pte_pfn(new_pte));
+        if (pg) {
+            flush_dcache_page(pg);
+        }
+    }
 
     return 0;
 }
